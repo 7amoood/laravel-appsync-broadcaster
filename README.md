@@ -108,8 +108,8 @@ For private and presence channels, you need to define authorization logic in you
 
 ```php
 // Private channel authorization
-Broadcast::channel('user/{userId}', function ($user, $userId) {
-    return (int) $user->id === (int) $userId;
+Broadcast::channel('orders/{orderID}', function ($user, $orderID) {
+    return (int) $user->id === (int) Order::find($orderID)->user_id;
 });
 
 // Presence channel authorization
