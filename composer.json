@@ -1,0 +1,61 @@
+{
+    "name": "7amoood/laravel-appsync-broadcaster",
+    "description": "AWS AppSync broadcaster for Laravel Broadcasting - Real-time communication using AWS AppSync GraphQL subscriptions",
+    "type": "library",
+    "keywords": [
+        "laravel",
+        "broadcasting",
+        "appsync",
+        "aws",
+        "realtime",
+        "event api",
+        "subscriptions",
+        "websockets",
+        "pusher",
+        "ably",
+        "replacement of pusher"
+    ],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Mohamed AbdElfattah",
+            "email": "mohamed.abdelfattah.ragab@gmail.com"
+        }
+    ],
+    "require": {
+        "php": "^8.0",
+        "illuminate/broadcasting": "^9.0|^10.0|^11.0",
+        "illuminate/http": "^9.0|^10.0|^11.0",
+        "illuminate/support": "^9.0|^10.0|^11.0",
+        "nesbot/carbon": "^2.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.0|^10.0",
+        "orchestra/testbench": "^7.0|^8.0|^9.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Hamoood\\LaravelAppSyncBroadcaster\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Hamoood\\LaravelAppSyncBroadcaster\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Hamoood\\LaravelAppSyncBroadcaster\\AppSyncBroadcastServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "test-coverage": "phpunit --coverage-html build/coverage",
+        "format": "php-cs-fixer fix",
+        "analyse": "phpstan analyse"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
