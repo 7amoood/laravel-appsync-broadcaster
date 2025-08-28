@@ -21,7 +21,7 @@ class AppSyncBroadcaster extends Broadcaster
 
     public function __construct($config)
     {
-        $this->validateConfig($config);
+        // $this->validateConfig($config);
         $this->config    = $config;
         $this->namespace = $config['namespace'];
         $this->initializeHttpClient();
