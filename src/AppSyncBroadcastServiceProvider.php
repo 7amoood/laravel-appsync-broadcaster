@@ -17,9 +17,9 @@ class AppSyncBroadcastServiceProvider extends ServiceProvider
     public function boot(BroadcastManager $broadcastManager)
     {
         // Publish config file
-        // $this->publishes([
-        //     __DIR__ . '/../config/appsync.php' => $this->app->configPath('appsync.php'),
-        // ], 'appsync-config');
+        $this->publishes([
+            __DIR__ . '/../config/appsync.php' => $this->app->configPath('appsync.php'),
+        ], 'appsync-config');
 
         $broadcastManager->extend('appsync', function ($app, $config) {
             return new AppSyncBroadcaster($config);
