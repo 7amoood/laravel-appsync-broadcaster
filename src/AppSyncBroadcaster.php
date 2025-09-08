@@ -199,10 +199,6 @@ class AppSyncBroadcaster extends Broadcaster
                     return;
                 }
 
-                if ($response->status() == 401) {
-                    throw new UnauthorizedException("Unauthorized: Invalid or expired token");
-                }
-
                 throw new BroadcastException(
                     "AppSync broadcast failed with status {$response->status()}: " . $response->body()
                 );
@@ -215,6 +211,10 @@ class AppSyncBroadcaster extends Broadcaster
                     Log::warning("Retrying broadcast to {$channel} (attempt {$attempt})");
                 }
             } catch (RequestException $e) {
+                if ($e->response && $e->response->status() == 401) {
+                    throw new UnauthorizedException("Unauthorized: Invalid or expired token");
+                }
+
                 throw new BroadcastException("HTTP request failed: " . $e->getMessage());
             }
         }
