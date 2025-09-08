@@ -9,6 +9,7 @@ use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Illuminate\Validation\UnauthorizedException;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
 class AppSyncBroadcaster extends Broadcaster
@@ -147,6 +148,12 @@ class AppSyncBroadcaster extends Broadcaster
             try {
                 $this->broadcastToChannel($channel, $event, $payload);
                 $successes++;
+            } catch (UnauthorizedException $e) {
+                $this->client = $this->client->withHeaders([
+                    'Authorization' => $this->getAuthToken(),
+                ]);
+                $this->broadcastToChannel($channel, $event, $payload);
+                $successes++;
             } catch (\Exception $e) {
                 $failures[] = [
                     'channel' => $channel,
@@ -190,6 +197,10 @@ class AppSyncBroadcaster extends Broadcaster
 
                 if ($response->successful()) {
                     return;
+                }
+
+                if ($response->status() == 401) {
+                    throw new UnauthorizedException("Unauthorized: Invalid or expired token");
                 }
 
                 throw new BroadcastException(
