@@ -148,9 +148,7 @@ class AppSyncBroadcaster extends Broadcaster
                 $this->broadcastToChannel($channel, $event, $payload);
                 $successes++;
             } catch (UnauthorizedException $e) {
-                $this->client = $this->client->withHeaders([
-                    'Authorization' => $this->getAuthToken(),
-                ]);
+                $this->initializeHttpClient();
                 $this->broadcastToChannel($channel, $event, $payload);
                 $successes++;
             } catch (\Exception $e) {
