@@ -9,6 +9,10 @@
 
 return [
     'driver'    => 'appsync',
+    'cache'     => [
+        'driver' => env('APPSYNC_CACHE_DRIVER', 'file'),
+        'prefix' => env('APPSYNC_CACHE_PREFIX', 'appsync_broadcast_'),
+    ],
     'namespace' => env('APPSYNC_NAMESPACE', 'default'),
     'app_id'    => env('APPSYNC_APP_ID'),
     'region'    => env('APPSYNC_EVENT_REGION'),

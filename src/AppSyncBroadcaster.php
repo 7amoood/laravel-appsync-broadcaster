@@ -6,6 +6,7 @@ use Illuminate\Broadcasting\Broadcasters\Broadcaster;
 use Illuminate\Broadcasting\BroadcastException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -253,30 +254,32 @@ class AppSyncBroadcaster extends Broadcaster
     protected function getAuthToken()
     {
         try {
-            $response = Http::asForm()
-                ->timeout(10)
-                ->post("https://{$this->config['options']['cognito_pool']}.auth.{$this->config['options']['cognito_region']}.amazoncognito.com/oauth2/token", [
-                    'grant_type'    => 'client_credentials',
-                    'scope'         => 'default-m2m-resource-server-l0ryrn/read',
-                    'client_id'     => $this->config['options']['cognito_client_id'],
-                    'client_secret' => $this->config['options']['cognito_client_secret'],
-                ]);
+            return Cache::driver($this->config['cache']['driver'])->remember($this->config['cache']['prefix'] . 'auth_token', 55, function () {
+                $response = Http::asForm()
+                    ->timeout(10)
+                    ->post("https://{$this->config['options']['cognito_pool']}.auth.{$this->config['options']['cognito_region']}.amazoncognito.com/oauth2/token", [
+                        'grant_type'    => 'client_credentials',
+                        'scope'         => 'default-m2m-resource-server-l0ryrn/read',
+                        'client_id'     => $this->config['options']['cognito_client_id'],
+                        'client_secret' => $this->config['options']['cognito_client_secret'],
+                    ]);
 
-            if ($response->failed()) {
-                Log::error("Failed to get auth token", [
-                    'status' => $response->status(),
-                    'body'   => $response->body(),
-                ]);
-                throw new BroadcastException("Failed to authenticate with Cognito: " . $response->body());
-            }
+                if ($response->failed()) {
+                    Log::error("Failed to get auth token", [
+                        'status' => $response->status(),
+                        'body'   => $response->body(),
+                    ]);
+                    throw new BroadcastException("Failed to authenticate with Cognito: " . $response->body());
+                }
 
-            $token = $response->json('access_token');
+                $token = $response->json('access_token');
 
-            if (! $token) {
-                throw new BroadcastException("No access token received from Cognito");
-            }
+                if (! $token) {
+                    throw new BroadcastException("No access token received from Cognito");
+                }
 
-            return $token;
+                return $token;
+            });
         } catch (\Exception $e) {
             Log::error("Auth token generation failed: " . $e->getMessage());
             throw $e;
