@@ -254,7 +254,7 @@ class AppSyncBroadcaster extends Broadcaster
     protected function getAuthToken()
     {
         try {
-            return Cache::driver($this->config['cache']['driver'])->remember($this->config['cache']['prefix'] . 'auth_token', 55, function () {
+            return Cache::driver($this->config['cache']['driver'])->get($this->config['cache']['prefix'] . 'auth_token', function () {
                 $response = Http::asForm()
                     ->timeout(10)
                     ->post("https://{$this->config['options']['cognito_pool']}.auth.{$this->config['options']['cognito_region']}.amazoncognito.com/oauth2/token", [
@@ -277,6 +277,8 @@ class AppSyncBroadcaster extends Broadcaster
                 if (! $token) {
                     throw new BroadcastException("No access token received from Cognito");
                 }
+
+                Cache::driver($this->config['cache']['driver'])->put($this->config['cache']['prefix'] . 'auth_token', $token, $response->json('expires_in', 3600) - 60);
 
                 return $token;
             });
