@@ -5,6 +5,7 @@ use Carbon\Carbon;
 use Illuminate\Broadcasting\Broadcasters\Broadcaster;
 use Illuminate\Broadcasting\BroadcastException;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -14,54 +15,62 @@ use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
 class AppSyncBroadcaster extends Broadcaster
 {
-    protected $config;
-    protected $client;
-    protected $namespace;
+    protected array $config;
+    protected ?PendingRequest $client = null;
+    protected string $namespace;
+    protected ?string $cachedToken = null;
+
     protected const MAX_RETRY_ATTEMPTS = 3;
     protected const RETRY_DELAY        = 100; // milliseconds
+    protected const TOKEN_BUFFER       = 60;  // seconds before expiry to refresh
 
-    public function __construct($config)
+    public function __construct(array $config)
     {
-        // $this->validateConfig($config);
         $this->config    = $config;
         $this->namespace = $config['namespace'];
-        $this->initializeHttpClient();
+    }
+
+
+    /**
+     * Get or create the HTTP client (lazy initialization)
+     */
+    protected function getClient(): PendingRequest
+    {
+        if ($this->client === null) {
+            $this->client = $this->createHttpClient();
+        }
+
+        return $this->client;
     }
 
     /**
-     * Validate the configuration array
+     * Create a fresh HTTP client with current auth token
      */
-    protected function validateConfig(array $config): void
+    protected function createHttpClient(): PendingRequest
     {
-        $required        = ['app_id', 'region', 'namespace', 'options'];
-        $requiredOptions = ['cognito_pool', 'cognito_region', 'cognito_client_id', 'cognito_client_secret'];
-
-        foreach ($required as $key) {
-            if (empty($config[$key])) {
-                throw new \InvalidArgumentException("Missing required config key: {$key}");
-            }
-        }
-
-        foreach ($requiredOptions as $key) {
-            if (empty($config['options'][$key])) {
-                throw new \InvalidArgumentException("Missing required config option: {$key}");
-            }
-        }
-    }
-
-    /**
-     * Initialize HTTP client with proper configuration
-     */
-    protected function initializeHttpClient(): void
-    {
-        $this->client = Http::baseUrl("https://{$this->config['app_id']}.appsync-api.{$this->config['region']}.amazonaws.com")
+        return Http::baseUrl($this->getApiBaseUrl())
             ->timeout(30)
-            ->retry(self::MAX_RETRY_ATTEMPTS, self::RETRY_DELAY)
             ->withHeaders([
-                'Content-Type'  => 'application/json',
-                'User-Agent'    => 'AppSyncBroadcaster/1.0',
-                'Authorization' => $this->getAuthToken(),
+                'Content-Type' => 'application/json',
+                'User-Agent'   => 'AppSyncBroadcaster/1.0',
             ]);
+    }
+
+    /**
+     * Get the API base URL
+     */
+    protected function getApiBaseUrl(): string
+    {
+        return "https://{$this->config['app_id']}.appsync-api.{$this->config['region']}.amazonaws.com";
+    }
+
+    /**
+     * Reset the HTTP client (forces re-creation on next use)
+     */
+    protected function resetClient(): void
+    {
+        $this->client      = null;
+        $this->cachedToken = null;
     }
 
     /**
@@ -149,9 +158,20 @@ class AppSyncBroadcaster extends Broadcaster
                 $this->broadcastToChannel($channel, $event, $payload);
                 $successes++;
             } catch (UnauthorizedException $e) {
-                $this->initializeHttpClient();
-                $this->broadcastToChannel($channel, $event, $payload);
-                $successes++;
+                // Token expired, reset client and retry once
+                $this->resetClient();
+                $this->clearAuthTokenCache();
+
+                try {
+                    $this->broadcastToChannel($channel, $event, $payload);
+                    $successes++;
+                } catch (\Exception $retryException) {
+                    $failures[] = [
+                        'channel' => $channel,
+                        'error'   => $retryException->getMessage(),
+                    ];
+                    Log::error("Broadcast retry failed for channel {$channel}: " . $retryException->getMessage());
+                }
             } catch (\Exception $e) {
                 $failures[] = [
                     'channel' => $channel,
@@ -188,18 +208,28 @@ class AppSyncBroadcaster extends Broadcaster
 
         while ($attempt < self::MAX_RETRY_ATTEMPTS) {
             try {
-                $response = $this->client->post('event', [
-                    'channel' => $fullChannel,
-                    'events'  => [json_encode($eventData)],
-                ]);
+                $response = $this->getClient()
+                    ->withHeader('Authorization', $this->getAuthToken())
+                    ->post('event', [
+                        'channel' => $fullChannel,
+                        'events'  => [json_encode($eventData)],
+                    ]);
 
                 if ($response->successful()) {
                     return;
                 }
 
+                // Handle 401 specifically
+                if ($response->status() === 401) {
+                    throw new UnauthorizedException("Unauthorized: Invalid or expired token");
+                }
+
                 throw new BroadcastException(
                     "AppSync broadcast failed with status {$response->status()}: " . $response->body()
                 );
+            } catch (UnauthorizedException $e) {
+                // Let this bubble up for handling in broadcast()
+                throw $e;
             } catch (ConnectionException $e) {
                 $lastException = $e;
                 $attempt++;
@@ -209,7 +239,7 @@ class AppSyncBroadcaster extends Broadcaster
                     Log::warning("Retrying broadcast to {$channel} (attempt {$attempt})");
                 }
             } catch (RequestException $e) {
-                if ($e->response && $e->response->status() == 401) {
+                if ($e->response && $e->response->status() === 401) {
                     throw new UnauthorizedException("Unauthorized: Invalid or expired token");
                 }
 
@@ -251,40 +281,108 @@ class AppSyncBroadcaster extends Broadcaster
         return $this->isPrivateChannel($channel) || $this->isPresenceChannel($channel);
     }
 
-    protected function getAuthToken()
+    /**
+     * Get cache key for auth token
+     */
+    protected function getAuthTokenCacheKey(): string
     {
+        return $this->config['cache']['prefix'] . 'auth_token';
+    }
+
+    /**
+     * Get cache driver instance
+     */
+    protected function getCacheDriver()
+    {
+        return Cache::driver($this->config['cache']['driver']);
+    }
+
+    /**
+     * Clear the auth token from cache
+     */
+    protected function clearAuthTokenCache(): void
+    {
+        $this->getCacheDriver()->forget($this->getAuthTokenCacheKey());
+        $this->cachedToken = null;
+    }
+
+    /**
+     * Get auth token with proper caching using Cache::remember()
+     */
+    protected function getAuthToken(): string
+    {
+        // Use in-memory cache for same request
+        if ($this->cachedToken !== null) {
+            return $this->cachedToken;
+        }
+
         try {
-            return Cache::driver($this->config['cache']['driver'])->get($this->config['cache']['prefix'] . 'auth_token', function () {
-                $response = Http::asForm()
-                    ->timeout(10)
-                    ->post("https://{$this->config['options']['cognito_pool']}.auth.{$this->config['options']['cognito_region']}.amazoncognito.com/oauth2/token", [
-                        'grant_type'    => 'client_credentials',
-                        'scope'         => 'default-m2m-resource-server-l0ryrn/read',
-                        'client_id'     => $this->config['options']['cognito_client_id'],
-                        'client_secret' => $this->config['options']['cognito_client_secret'],
-                    ]);
+            $cacheKey = $this->getAuthTokenCacheKey();
+            $cache    = $this->getCacheDriver();
 
-                if ($response->failed()) {
-                    Log::error("Failed to get auth token", [
-                        'status' => $response->status(),
-                        'body'   => $response->body(),
-                    ]);
-                    throw new BroadcastException("Failed to authenticate with Cognito: " . $response->body());
-                }
+            // Try to get from cache first
+            $token = $cache->get($cacheKey);
 
-                $token = $response->json('access_token');
-
-                if (! $token) {
-                    throw new BroadcastException("No access token received from Cognito");
-                }
-
-                Cache::driver($this->config['cache']['driver'])->put($this->config['cache']['prefix'] . 'auth_token', $token, $response->json('expires_in', 3600) - 60);
+            if ($token) {
+                $this->cachedToken = $token;
 
                 return $token;
-            });
+            }
+
+            // Token not in cache, fetch new one
+            $token             = $this->fetchNewAuthToken();
+            $this->cachedToken = $token;
+
+            return $token;
         } catch (\Exception $e) {
             Log::error("Auth token generation failed: " . $e->getMessage());
             throw $e;
         }
+    }
+
+    /**
+     * Fetch a new auth token from Cognito
+     */
+    protected function fetchNewAuthToken(): string
+    {
+        $cognitoUrl = sprintf(
+            "https://%s.auth.%s.amazoncognito.com/oauth2/token",
+            $this->config['options']['cognito_pool'],
+            $this->config['options']['cognito_region']
+        );
+
+        $response = Http::asForm()
+            ->timeout(10)
+            ->retry(2, 100)
+            ->post($cognitoUrl, [
+                'grant_type'    => 'client_credentials',
+                'scope'         => 'default-m2m-resource-server-l0ryrn/read',
+                'client_id'     => $this->config['options']['cognito_client_id'],
+                'client_secret' => $this->config['options']['cognito_client_secret'],
+            ]);
+
+        if ($response->failed()) {
+            Log::error("Failed to get auth token", [
+                'status' => $response->status(),
+                'body'   => $response->body(),
+            ]);
+            throw new BroadcastException("Failed to authenticate with Cognito: " . $response->body());
+        }
+
+        $token     = $response->json('access_token');
+        $expiresIn = $response->json('expires_in', 3600);
+
+        if (! $token) {
+            throw new BroadcastException("No access token received from Cognito");
+        }
+
+        // Cache the token with buffer time before expiry
+        $this->getCacheDriver()->put(
+            $this->getAuthTokenCacheKey(),
+            $token,
+            $expiresIn - self::TOKEN_BUFFER
+        );
+
+        return $token;
     }
 }
