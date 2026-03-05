@@ -30,7 +30,6 @@ class AppSyncBroadcaster extends Broadcaster
         $this->namespace = $config['namespace'];
     }
 
-
     /**
      * Get or create the HTTP client (lazy initialization)
      */
@@ -356,7 +355,7 @@ class AppSyncBroadcaster extends Broadcaster
             ->retry(2, 100)
             ->post($cognitoUrl, [
                 'grant_type'    => 'client_credentials',
-                'scope'         => 'default-m2m-resource-server-l0ryrn/read',
+                'scope'         => $this->config['options']['cognito_scope'],
                 'client_id'     => $this->config['options']['cognito_client_id'],
                 'client_secret' => $this->config['options']['cognito_client_secret'],
             ]);

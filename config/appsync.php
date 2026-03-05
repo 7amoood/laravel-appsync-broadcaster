@@ -17,6 +17,7 @@ return [
     'app_id'    => env('APPSYNC_APP_ID'),
     'region'    => env('APPSYNC_EVENT_REGION'),
     'options'   => [
+        'cognito_scope'         => env('APPSYNC_COGNITO_SCOPE'),
         'cognito_pool'          => env('APPSYNC_COGNITO_POOL'),
         'cognito_region'        => env('APPSYNC_COGNITO_REGION', env('APPSYNC_EVENT_REGION')),
         'cognito_client_id'     => env('APPSYNC_COGNITO_CLIENT_ID'),
