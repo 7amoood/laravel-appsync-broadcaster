@@ -289,11 +289,11 @@ class AppSyncBroadcaster extends Broadcaster
     }
 
     /**
-     * Get cache driver instance
+     * Get cache store instance
      */
-    protected function getCacheDriver()
+    protected function getCacheStore()
     {
-        return Cache::driver($this->config['cache']['driver']);
+        return Cache::store($this->config['cache']['store']);
     }
 
     /**
@@ -301,7 +301,7 @@ class AppSyncBroadcaster extends Broadcaster
      */
     protected function clearAuthTokenCache(): void
     {
-        $this->getCacheDriver()->forget($this->getAuthTokenCacheKey());
+        $this->getCacheStore()->forget($this->getAuthTokenCacheKey());
         $this->cachedToken = null;
     }
 
@@ -317,7 +317,7 @@ class AppSyncBroadcaster extends Broadcaster
 
         try {
             $cacheKey = $this->getAuthTokenCacheKey();
-            $cache    = $this->getCacheDriver();
+            $cache    = $this->getCacheStore();
 
             // Try to get from cache first
             $token = $cache->get($cacheKey);
@@ -376,7 +376,7 @@ class AppSyncBroadcaster extends Broadcaster
         }
 
         // Cache the token with buffer time before expiry
-        $this->getCacheDriver()->put(
+        $this->getCacheStore()->put(
             $this->getAuthTokenCacheKey(),
             $token,
             $expiresIn - self::TOKEN_BUFFER

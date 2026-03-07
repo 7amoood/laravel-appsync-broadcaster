@@ -10,7 +10,7 @@
 return [
     'driver'    => 'appsync',
     'cache'     => [
-        'driver' => env('APPSYNC_CACHE_DRIVER', 'file'),
+        'store'  => env('APPSYNC_CACHE_DRIVER', env('CACHE_STORE', 'file')),
         'prefix' => env('APPSYNC_CACHE_PREFIX', 'appsync_broadcast_'),
     ],
     'namespace' => env('APPSYNC_NAMESPACE', 'default'),
