@@ -22,11 +22,11 @@ class AppSyncBroadcastServiceProvider extends ServiceProvider
 
     public function boot(BroadcastManager $broadcastManager): void
     {
-        $this->publishes([
-            __DIR__ . '/../config/appsync.php' => $this->app->configPath('appsync.php'),
-        ], 'appsync-config');
-
         if ($this->app->runningInConsole()) {
+            $this->publishes([
+                __DIR__ . '/../config/appsync.php' => $this->app->configPath('appsync.php'),
+            ], 'appsync-config');
+
             $this->commands([
                 AppSyncWorkerCommand::class,
             ]);
