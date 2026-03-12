@@ -159,20 +159,6 @@ class AppSyncWorkerCommand extends Command
 
     protected function runWithWebSocket(array $config): int
     {
-        if (! class_exists(\Ratchet\Client\Connector::class)) {
-            $this->error('ratchet/pawl is required for WebSocket transport.');
-            $this->error('Install: composer require ratchet/pawl:^0.4');
-
-            return self::FAILURE;
-        }
-
-        if (! class_exists(\Clue\React\Redis\Factory::class)) {
-            $this->error('clue/redis-react is required for WebSocket transport.');
-            $this->error('Install: composer require clue/redis-react:^2.7');
-
-            return self::FAILURE;
-        }
-
         $wsConfig      = $config['websocket'] ?? [];
         $redisConfig   = $config['redis'] ?? [];
         $redisChannel  = $this->option('redis-channel') ?: ($redisConfig['channel'] ?? 'appsync:events');
