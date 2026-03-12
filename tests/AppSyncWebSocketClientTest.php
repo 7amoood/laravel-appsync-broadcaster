@@ -112,28 +112,51 @@ class AppSyncWebSocketClientTest extends TestCase
         $tokenManager = new TokenManager($config);
         $client       = new AppSyncWebSocketClient($loop, $config, $tokenManager);
 
-        // Use reflection to test the URL builder
+        // Test the URL builder (no auth in URL anymore)
         $reflection = new \ReflectionClass($client);
-        $method     = $reflection->getMethod('buildConnectionUrl');
-        $method->setAccessible(true);
+        $urlMethod  = $reflection->getMethod('buildConnectionUrl');
+        $urlMethod->setAccessible(true);
 
-        $url = $method->invoke($client, 'test-token-123');
+        $url = $urlMethod->invoke($client);
 
-        // Verify URL structure
-        $this->assertStringStartsWith('wss://test-app-id.appsync-realtime-api.us-east-1.amazonaws.com/event/realtime?', $url);
-        $this->assertStringContainsString('header=', $url);
-        $this->assertStringContainsString('payload=', $url);
+        $this->assertEquals(
+            'wss://test-app-id.appsync-realtime-api.us-east-1.amazonaws.com/event/realtime',
+            $url
+        );
 
-        // Verify header contains auth info
-        parse_str(parse_url($url, PHP_URL_QUERY), $params);
-        $header = json_decode(base64_decode($params['header']), true);
+        // No query parameters should be present
+        $this->assertFalse(str_contains($url, '?'));
+    }
+
+    public function test_auth_protocol_format()
+    {
+        if (! class_exists(\React\EventLoop\Loop::class)) {
+            $this->markTestSkipped('react/event-loop not installed');
+        }
+
+        $loop         = \React\EventLoop\Loop::get();
+        $config       = $this->getValidConfig();
+        $tokenManager = new TokenManager($config);
+        $client       = new AppSyncWebSocketClient($loop, $config, $tokenManager);
+
+        // Test the auth subprotocol builder
+        $reflection = new \ReflectionClass($client);
+        $authMethod = $reflection->getMethod('buildAuthProtocol');
+        $authMethod->setAccessible(true);
+
+        $protocol = $authMethod->invoke($client, 'test-token-123');
+
+        // Must start with header- prefix
+        $this->assertStringStartsWith('header-', $protocol);
+
+        // Decode the base64url payload and verify contents
+        $encoded = substr($protocol, strlen('header-'));
+        // Reverse base64url: restore +/ and padding
+        $decoded = base64_decode(strtr($encoded, '-_', '+/'));
+        $header  = json_decode($decoded, true);
 
         $this->assertEquals('test-app-id.appsync-api.us-east-1.amazonaws.com', $header['host']);
         $this->assertEquals('Bearer test-token-123', $header['Authorization']);
-
-        // Verify payload is empty JSON object
-        $payload = base64_decode($params['payload']);
-        $this->assertEquals('{}', $payload);
     }
 
     public function test_callback_registration()

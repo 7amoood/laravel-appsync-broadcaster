@@ -108,14 +108,15 @@ class AppSyncWebSocketClient
             return;
         }
 
-        $url       = $this->buildConnectionUrl($token);
-        $connector = new Connector($this->loop);
+        $url          = $this->buildConnectionUrl();
+        $authProtocol = $this->buildAuthProtocol($token);
+        $connector    = new Connector($this->loop);
 
         Log::info('AppSync WS: connecting', [
             'attempt' => $this->reconnectAttempts + 1,
         ]);
 
-        $connector($url, ['aws-appsync-event-ws'])
+        $connector($url, ['aws-appsync-event-ws', $authProtocol])
             ->then(
                 function (WebSocket $conn) {
                     $this->onConnected($conn);
@@ -296,8 +297,27 @@ class AppSyncWebSocketClient
                 $this->handlePublishError($data);
                 break;
 
+            case 'connection_error':
+                $this->handleConnectionError($data);
+                break;
+
             default:
                 Log::debug('AppSync WS: unhandled message type', ['type' => $data['type']]);
+        }
+    }
+
+    protected function handleConnectionError(array $data): void
+    {
+        $errors = $data['errors'] ?? [];
+
+        Log::error('AppSync WS: connection_error received', [
+            'errors' => $errors,
+        ]);
+
+        // Force close — AppSync will close the socket after sending
+        // connection_error, but we clean up proactively.
+        if ($this->connection) {
+            $this->connection->close();
         }
     }
 
@@ -436,25 +456,39 @@ class AppSyncWebSocketClient
     // =========================================================================
 
     /**
-     * Build the full WebSocket URL with base64-encoded auth headers.
+     * Build the plain WebSocket URL (no auth in query params).
      *
-     * AppSync requires the auth header and an empty payload to be
-     * provided as query parameters during the WebSocket handshake.
+     * AppSync Event API expects auth via the WebSocket subprotocol header,
+     * not as URL query parameters.
      */
-    protected function buildConnectionUrl(string $token): string
+    protected function buildConnectionUrl(): string
     {
         $appId  = $this->config['app_id'];
         $region = $this->config['region'];
 
-        $header = base64_encode(json_encode([
+        return "wss://{$appId}.appsync-realtime-api.{$region}.amazonaws.com/event/realtime";
+    }
+
+    /**
+     * Build the base64url-encoded auth subprotocol string.
+     *
+     * AppSync Event API requires auth to be passed as a WebSocket subprotocol
+     * in the format: header-<base64url_encoded_json_auth>
+     */
+    protected function buildAuthProtocol(string $token): string
+    {
+        $appId  = $this->config['app_id'];
+        $region = $this->config['region'];
+
+        $header = json_encode([
             'host' => "{$appId}.appsync-api.{$region}.amazonaws.com",
             'Authorization' => "Bearer {$token}",
-        ]));
+        ]);
 
-        $payload = base64_encode('{}');
+        // Base64url encoding (RFC 4648 §5): replace +/ with -_, strip padding
+        $encoded = rtrim(strtr(base64_encode($header), '+/', '-_'), '=');
 
-        return "wss://{$appId}.appsync-realtime-api.{$region}.amazonaws.com"
-            . "/event/realtime?header={$header}&payload={$payload}";
+        return "header-{$encoded}";
     }
 
     protected function send(array $data): void
