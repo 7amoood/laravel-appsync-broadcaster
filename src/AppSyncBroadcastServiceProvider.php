@@ -16,12 +16,16 @@ class AppSyncBroadcastServiceProvider extends ServiceProvider
     {
         $this->mergeConfigFrom(
             __DIR__ . '/../config/appsync.php',
-            'broadcasting.connections.appsync'
+            'appsync'
         );
     }
 
     public function boot(BroadcastManager $broadcastManager): void
     {
+        config([
+            'broadcasting.connections.appsync' => config('appsync'),
+        ]);
+
         if ($this->app->runningInConsole()) {
             $this->publishes([
                 __DIR__ . '/../config/appsync.php' => $this->app->configPath('appsync.php'),
