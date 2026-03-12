@@ -167,6 +167,11 @@ class AppSyncWorkerCommand extends Command
         $maxBuffer     = (int) ($this->option('max-buffer') ?: ($wsConfig['max_buffer_size'] ?? 10000));
         $statsInterval = (int) ($this->option('stats-interval') ?: ($wsConfig['stats_interval'] ?? 30));
 
+        // Laravel's Redis client applies a prefix (e.g. "laravel_database_") to
+        // all commands including PUBLISH. clue/redis-react doesn't know about
+        // this prefix, so we must prepend it manually to match the channel.
+        $redisChannel = $this->getPrefixedRedisChannel($redisChannel, $redisConfig);
+
         $this->startTime = microtime(true);
         $this->printBanner('websocket', $redisChannel, $batchSize, $flushInterval);
 
@@ -322,6 +327,17 @@ class AppSyncWorkerCommand extends Command
     // =====================================================================
     // Shared helpers
     // =====================================================================
+
+    protected function getPrefixedRedisChannel(string $channel, array $redisConfig): string
+    {
+        $connection      = $redisConfig['connection'] ?? 'default';
+        $connectionPrefix = config("database.redis.{$connection}.prefix");
+        $globalPrefix     = config('database.redis.options.prefix', '');
+
+        $prefix = $connectionPrefix ?? $globalPrefix;
+
+        return $prefix . $channel;
+    }
 
     protected function buildRedisUrl(array $config): string
     {
