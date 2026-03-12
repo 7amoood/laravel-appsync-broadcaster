@@ -16,17 +16,15 @@ class ServiceProviderTest extends TestCase
 
     public function test_config_is_merged_when_not_published()
     {
-        // Ensure no published config exists
         $publishedConfigPath = $this->app->configPath('broadcasting/appsync.php');
+
         if (File::exists($publishedConfigPath)) {
             File::delete($publishedConfigPath);
         }
 
-        // Reinitialize the service provider
         $serviceProvider = new AppSyncBroadcastServiceProvider($this->app);
         $serviceProvider->register();
 
-        // Check if config is merged
         $config = config('broadcasting.connections.appsync');
         $this->assertNotNull($config);
         $this->assertEquals('appsync', $config['driver']);
@@ -34,25 +32,19 @@ class ServiceProviderTest extends TestCase
 
     public function test_published_config_takes_precedence()
     {
-        // Create a mock published config
         $publishedConfigPath = $this->app->configPath('broadcasting/appsync.php');
         File::ensureDirectoryExists(dirname($publishedConfigPath));
         File::put($publishedConfigPath, "<?php\nreturn ['driver' => 'published', 'custom' => 'value'];");
 
-        // Reinitialize the service provider
         $serviceProvider = new AppSyncBroadcastServiceProvider($this->app);
         $serviceProvider->register();
 
-        // Check if published config is used
         $config = config('broadcasting.connections.appsync');
 
-        // Clean up
         File::delete($publishedConfigPath);
         File::deleteDirectory(dirname($publishedConfigPath));
 
-                                 // The published config should not be automatically merged
-                                 // when file exists (this is the desired behavior)
-        $this->assertTrue(true); // Test passes if no exception thrown
+        $this->assertTrue(true);
     }
 
     public function test_config_can_be_published()
@@ -60,15 +52,29 @@ class ServiceProviderTest extends TestCase
         $this->artisan('vendor:publish', ['--tag' => 'appsync-config'])
             ->assertExitCode(0);
 
-        $publishedConfigPath = $this->app->configPath('broadcasting/appsync.php');
+        $publishedConfigPath = $this->app->configPath('appsync.php');
         $this->assertTrue(File::exists($publishedConfigPath));
 
         $publishedConfig = include $publishedConfigPath;
         $this->assertIsArray($publishedConfig);
         $this->assertEquals('appsync', $publishedConfig['driver']);
 
-        // Clean up
         File::delete($publishedConfigPath);
-        File::deleteDirectory(dirname($publishedConfigPath));
+    }
+
+    public function test_config_has_expected_structure()
+    {
+        $config = config('broadcasting.connections.appsync');
+
+        $this->assertArrayHasKey('driver', $config);
+        $this->assertArrayHasKey('mode', $config);
+        $this->assertArrayHasKey('transport', $config);
+        $this->assertArrayHasKey('cache', $config);
+        $this->assertArrayHasKey('namespace', $config);
+        $this->assertArrayHasKey('retry', $config);
+        $this->assertArrayHasKey('redis', $config);
+        $this->assertArrayHasKey('websocket', $config);
+        $this->assertArrayHasKey('token', $config);
+        $this->assertArrayHasKey('options', $config);
     }
 }
