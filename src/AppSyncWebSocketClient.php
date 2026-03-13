@@ -134,9 +134,9 @@ class AppSyncWebSocketClient
     {
         if ($this->connection) {
             $this->connection->close();
+        } else {
+            $this->cleanup();
         }
-
-        $this->cleanup();
     }
 
     // =========================================================================
@@ -404,7 +404,6 @@ class AppSyncWebSocketClient
                 ]);
 
                 $this->disconnect();
-                $this->scheduleReconnect();
             }
         });
     }
