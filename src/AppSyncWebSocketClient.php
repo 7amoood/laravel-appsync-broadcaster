@@ -255,10 +255,16 @@ class AppSyncWebSocketClient
 
     protected function onClose($code, $reason): void
     {
-        Log::warning('AppSync WS: connection closed', [
-            'code'   => $code,
-            'reason' => $reason,
-        ]);
+        // Code 1000 is a normal closure — AppSync evicts idle Event API
+        // sockets after ~5 min of inactivity, and also closes cleanly when
+        // the bearer token expires. Both are expected; reconnect handles it.
+        $context = ['code' => $code, 'reason' => $reason];
+
+        if ((int) $code === 1000) {
+            Log::info('AppSync WS: connection closed (normal)', $context);
+        } else {
+            Log::warning('AppSync WS: connection closed', $context);
+        }
 
         $this->cleanup();
         $this->scheduleReconnect();
