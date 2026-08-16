@@ -1,0 +1,61 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    name: PHP ${{ matrix.php }} — Laravel ${{ matrix.laravel }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Laravel 13 (PHP ^8.3)
+          - { php: '8.4', laravel: '13.*', testbench: '11.*' }
+          - { php: '8.3', laravel: '13.*', testbench: '11.*' }
+          # Laravel 12 (PHP ^8.2)
+          - { php: '8.4', laravel: '12.*', testbench: '10.*' }
+          - { php: '8.3', laravel: '12.*', testbench: '10.*' }
+          - { php: '8.2', laravel: '12.*', testbench: '10.*' }
+          # Laravel 11 (PHP ^8.2) — past security EOL, see `eol` below
+          - { php: '8.3', laravel: '11.*', testbench: '9.*', eol: true }
+          - { php: '8.2', laravel: '11.*', testbench: '9.*', eol: true }
+          # Laravel 10 (PHP ^8.1) — past security EOL, see `eol` below
+          - { php: '8.3', laravel: '10.*', testbench: '8.*', eol: true }
+          - { php: '8.2', laravel: '10.*', testbench: '8.*', eol: true }
+          - { php: '8.1', laravel: '10.*', testbench: '8.*', eol: true }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: json, mbstring, pcntl
+          coverage: none
+
+      # Laravel 10 and 11 are past security EOL: every release in those branches
+      # carries an unpatched advisory, so Composer's default advisory policy
+      # refuses to install them at all. The package still supports them, so the
+      # legacy jobs opt out in order to actually exercise that support.
+      - name: Allow EOL Laravel releases
+        if: matrix.eol
+        run: composer config policy.advisories.block false
+
+      - name: Install dependencies
+        run: |
+          composer require --no-update --dev \
+            "laravel/framework:${{ matrix.laravel }}" \
+            "orchestra/testbench:${{ matrix.testbench }}"
+          composer update --prefer-stable --prefer-dist --no-interaction --no-progress
+
+      - name: Run tests
+        run: vendor/bin/phpunit

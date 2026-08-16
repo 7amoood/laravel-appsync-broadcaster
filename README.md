@@ -480,11 +480,33 @@ Important lifecycle and failure details are logged through Laravel's logging sys
 
 ## Requirements
 
-- PHP ^8.0
-- Laravel ^9.0|^10.0|^11.0
+- PHP ^8.1
+- Laravel ^10.0|^11.0|^12.0|^13.0
 - AWS AppSync API
 - AWS Cognito User Pool
 - Redis server (only when using `APPSYNC_MODE=redis`)
+
+### Compatibility
+
+Composer picks the highest Laravel version your PHP runtime allows.
+
+| Laravel | PHP | Supported |
+| --- | --- | --- |
+| 13.x | 8.3, 8.4 | ✅ |
+| 12.x | 8.2, 8.3, 8.4 | ✅ |
+| 11.x | 8.2, 8.3, 8.4 | ✅ |
+| 10.x | 8.1, 8.2, 8.3 | ✅ |
+
+Laravel 9 and below are no longer supported; pin `^1.0` of this package if you
+need them.
+
+> **Installing on Laravel 10 or 11**: both branches are past their security-EOL,
+> and every release in them carries an unpatched advisory. Recent Composer
+> versions refuse to install advisory-affected packages by default, so a fresh
+> install pinned to `laravel/framework:^10.0` or `^11.0` will fail to resolve —
+> this package is not the cause. Existing lock files are unaffected. To install
+> anyway, opt out with `composer config policy.advisories.block false`. Upgrading
+> to Laravel 12 or 13 is the better answer.
 
 ## License
 
