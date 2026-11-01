@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-01
+
+`redis` mode now queues events on a Redis **list** (`RPUSH` / `BLPOP`) instead
+of Pub/Sub (`PUBLISH` / `SUBSCRIBE`). Pub/Sub keeps nothing: an event published
+while no worker was subscribed was dropped without trace. A list keeps it until
+the worker pops it.
+
+### Fixed
+- **Events lost while the worker was down.** Events published during a deploy
+  restart, a crash or a Redis reconnect went to zero subscribers and were gone.
+  They now wait in the list.
+- **WebSocket worker going deaf after a Redis drop.** The worker read Redis
+  through `clue/redis-react`'s lazy client, which clears its subscriptions when
+  the connection drops and never re-subscribes. The process stayed up, kept
+  logging stats, and received nothing until it was restarted. Every pop is now a
+  fresh `BLPOP`, so the lazy client reconnects on the next one.
+- **Events dropped while AppSync was unreachable.** The WebSocket worker kept
+  receiving into an in-memory buffer and dropped events once it was full. It now
+  stops popping while the WebSocket is not ready or the buffer is full, so the
+  events stay in Redis.
+- **HTTP worker ignored SIGTERM / SIGINT.** The handlers only logged, so the
+  process kept running until it was force-killed. Both workers now finish
+  the pop in flight (at most `block_timeout` seconds), flush and exit.
+- **HTTP worker sent more than 5 events per request.** It published a whole
+  channel's buffer (up to `batch_size`, 50 by default) in one request; AppSync
+  accepts at most 5. Batches are now chunked to 5.
+- **HTTP worker held a partial batch until the next event.** It now flushes as
+  soon as the list runs dry.
+- A batch the WebSocket client refuses to send now counts toward
+  `events_dropped` instead of vanishing from the stats.
+
+### Added
+- `redis.key` (`APPSYNC_REDIS_KEY`): the list name. Defaults to
+  `APPSYNC_REDIS_CHANNEL`, then `appsync:events`.
+- `redis.max_length` (`APPSYNC_REDIS_MAX_LENGTH`, default 10000): the list is
+  trimmed to this many events (oldest dropped first) so a worker that never comes
+  back cannot fill Redis. `0` disables the cap.
+- `redis.block_timeout` (`APPSYNC_REDIS_BLOCK_TIMEOUT`, default 1): seconds a
+  worker waits on an empty list; also the longest a shutdown waits.
+- `--redis-key` worker option.
+
+### Deprecated
+- `redis.channel` and `--redis-channel`. Both still work and name the list.
+
+### Upgrading
+Update the publishing app and the worker together. During the rollout, an old
+worker does not read the list, so events queue there (up to `max_length`) and
+the new worker delivers them when it starts. Events an old publisher sends over
+Pub/Sub after the new worker starts are lost, exactly as before. A published
+`config/appsync.php` keeps working; add the three new `redis` keys to change
+their defaults.
+
 ## [1.1.0] - 2026-08-16
 
 Adds Laravel 13 support. Laravel 10, 11, 12 and 13 are all supported from this

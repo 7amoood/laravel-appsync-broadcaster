@@ -7,7 +7,7 @@
  *
  *   mode      – How Laravel publishes events:
  *                'direct' = Laravel → Transport → AppSync
- *                'redis'  = Laravel → Redis Pub/Sub → Worker → AppSync
+ *                'redis'  = Laravel → Redis list → Worker → AppSync
  *
  *   transport – How events reach AppSync:
  *                'http'      = one HTTP POST per publish
@@ -60,10 +60,12 @@ return [
         'multiplier'   => (float) env('APPSYNC_RETRY_MULTIPLIER', 2.0),
     ],
 
-    // Redis Pub/Sub settings (used when mode = 'redis')
+    // Redis list settings (used when mode = 'redis')
     'redis'     => [
         'connection'     => env('APPSYNC_REDIS_CONNECTION', 'default'),
-        'channel'        => env('APPSYNC_REDIS_CHANNEL', 'appsync:events'),
+        'key'            => env('APPSYNC_REDIS_KEY', env('APPSYNC_REDIS_CHANNEL', 'appsync:events')),
+        'max_length'     => (int) env('APPSYNC_REDIS_MAX_LENGTH', 10000), // oldest dropped beyond this; 0 = no cap
+        'block_timeout'  => (int) env('APPSYNC_REDIS_BLOCK_TIMEOUT', 1),   // seconds the worker waits on an empty list
         'batch_size'     => (int) env('APPSYNC_REDIS_BATCH_SIZE', 50),
         'flush_interval' => (int) env('APPSYNC_REDIS_FLUSH_INTERVAL', 100), // milliseconds
     ],
