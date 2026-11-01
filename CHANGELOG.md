@@ -37,6 +37,9 @@ the worker pops it.
   soon as the list runs dry.
 - A batch the WebSocket client refuses to send now counts toward
   `events_dropped` instead of vanishing from the stats.
+- `guzzlehttp/guzzle` is now a direct requirement. `TokenManager` and the HTTP
+  transport use Laravel's HTTP client, which needs Guzzle, and `illuminate/http`
+  only requires it from Laravel 11. Laravel 10 apps had it from the app skeleton.
 
 ### Added
 - `redis.key` (`APPSYNC_REDIS_KEY`): the list name. Defaults to
