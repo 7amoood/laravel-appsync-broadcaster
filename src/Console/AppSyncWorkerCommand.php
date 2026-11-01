@@ -2,6 +2,7 @@
 namespace Hamoood\LaravelAppSyncBroadcaster\Console;
 
 use Hamoood\LaravelAppSyncBroadcaster\AppSyncWebSocketClient;
+use Hamoood\LaravelAppSyncBroadcaster\Broadcasters\RedisBroadcaster;
 use Hamoood\LaravelAppSyncBroadcaster\TokenManager;
 use Hamoood\LaravelAppSyncBroadcaster\Transport\HttpTransport;
 use Hamoood\LaravelAppSyncBroadcaster\Transport\WebSocketTransport;
@@ -9,13 +10,21 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
+use React\EventLoop\LoopInterface;
 
 /**
- * Long-running worker that subscribes to Redis Pub/Sub and relays
- * events to AppSync using the configured transport (HTTP or WebSocket).
+ * Long-running worker that pops events from a Redis list and relays
+ * them to AppSync using the configured transport (HTTP or WebSocket).
  *
- * HTTP transport  : blocking Redis SUBSCRIBE loop, one HTTP POST per batch.
- * WebSocket transport: ReactPHP event loop, persistent WS connection.
+ * The list is durable: events pushed while this worker is down, restarting
+ * or reconnecting to Redis wait there until it pops them.
+ *
+ * HTTP transport     : blocking BLPOP loop, one HTTP POST per batch.
+ * WebSocket transport: ReactPHP event loop, async BLPOP, persistent WS connection.
+ *                      It only pops while the WebSocket is ready and the buffer has
+ *                      room, so an AppSync outage leaves events in Redis instead of
+ *                      dropping them. Every pop is a fresh command, so a dropped Redis
+ *                      connection is re-opened by the next one.
  *
  * Usage:
  *   php artisan appsync:worker
@@ -26,15 +35,21 @@ use Illuminate\Support\Str;
  */
 class AppSyncWorkerCommand extends Command
 {
+    /**
+     * AppSync accepts at most this many events in one publish, over HTTP or WebSocket.
+     */
+    public const MAX_EVENTS_PER_PUBLISH = 5;
+
     protected $signature = 'appsync:worker
         {--transport=      : Transport to use: http or websocket (default from config)}
         {--batch-size=     : Max events to batch before flushing}
         {--flush-interval= : Max ms before flushing a partial batch}
-        {--redis-channel=  : Redis Pub/Sub channel to subscribe to}
-        {--max-buffer=     : Max buffered events before dropping}
+        {--redis-key=      : Redis list to pop events from (default from config)}
+        {--redis-channel=  : Deprecated alias of --redis-key}
+        {--max-buffer=     : Max buffered events before the worker stops popping}
         {--stats-interval= : Seconds between stats log lines (default 30)}';
 
-    protected $description = 'Subscribe to Redis and relay events to AppSync (HTTP or WebSocket)';
+    protected $description = 'Pop events from a Redis list and relay them to AppSync (HTTP or WebSocket)';
 
     // Shared metrics
     protected int $eventsReceived  = 0;
@@ -46,6 +61,9 @@ class AppSyncWorkerCommand extends Command
     // Buffer: channel => [event_json_strings]
     protected array $buffer    = [];
     protected int $bufferCount = 0;
+
+    // Set by SIGTERM / SIGINT; the loops finish their current pop, flush and exit
+    protected bool $stopping = false;
 
     public function handle(): int
     {
@@ -67,7 +85,7 @@ class AppSyncWorkerCommand extends Command
     }
 
     // =====================================================================
-    // HTTP transport path (blocking subscribe)
+    // HTTP transport path (blocking pop)
     // =====================================================================
 
     protected function runWithHttp(array $config): int
@@ -76,50 +94,60 @@ class AppSyncWorkerCommand extends Command
         $httpTransport = new HttpTransport($config, $tokenManager);
 
         $redisConfig   = $config['redis'] ?? [];
-        $redisChannel  = $this->option('redis-channel') ?: ($redisConfig['channel'] ?? 'appsync:events');
-        $redisConn     = $redisConfig['connection'] ?? 'default';
+        $redisKey      = $this->redisKey($config);
+        $redis         = Redis::connection($redisConfig['connection'] ?? 'default');
+        $blockTimeout  = $this->blockTimeout($redisConfig);
         $batchSize     = (int) ($this->option('batch-size') ?: ($redisConfig['batch_size'] ?? 50));
         $flushInterval = (int) ($this->option('flush-interval') ?: ($redisConfig['flush_interval'] ?? 100));
 
         $this->startTime = microtime(true);
-        $this->printBanner('http', $redisChannel, $batchSize, $flushInterval);
+        $this->printBanner('http', $redisKey, $batchSize, $flushInterval);
 
         $this->registerPcntlSignals();
 
         $lastFlush = $this->currentTimeMs();
 
-        Redis::connection($redisConn)->subscribe([$redisChannel], function (string $message) use (
-            $httpTransport, $batchSize, $flushInterval, &$lastFlush
-        ) {
-            $this->eventsReceived++;
+        while (! $this->stopping) {
+            try {
+                // Block only while the buffer is empty; with events waiting to be
+                // flushed, take whatever else is already queued and flush the moment
+                // the list runs dry.
+                $message = $this->bufferCount > 0
+                    ? $redis->lpop($redisKey)
+                    : ($redis->blpop($redisKey, $blockTimeout)[1] ?? null);
+            } catch (\Throwable $e) {
+                if ($this->stopping) {
+                    break;
+                }
 
-            $event = json_decode($message, true);
+                Log::error('AppSync worker: Redis pop failed', ['error' => $e->getMessage()]);
+                $this->error("Redis pop failed: {$e->getMessage()}");
 
-            if (! $event || empty($event['channel'])) {
-                Log::warning('AppSync worker: invalid message', [
-                    'payload' => Str::limit($message, 200),
-                ]);
+                sleep(1);
 
-                return;
+                continue;
             }
 
-            $channel      = $event['channel'];
-            $eventPayload = json_encode([
-                'event'   => $event['event'] ?? '',
-                'data'    => $event['data'] ?? [],
-                'channel' => $channel,
-            ]);
+            $drained = ! is_string($message);
 
-            $this->buffer[$channel][] = $eventPayload;
-            $this->bufferCount++;
+            if (! $drained && ($event = $this->decodeEvent($message))) {
+                $this->buffer[$event['channel']][] = json_encode([
+                    'event'   => $event['event'] ?? '',
+                    'data'    => $event['data'] ?? [],
+                    'channel' => $event['channel'],
+                ]);
+                $this->bufferCount++;
+            }
 
-            $elapsed = $this->currentTimeMs() - $lastFlush;
-
-            if ($this->bufferCount >= $batchSize || $elapsed >= $flushInterval) {
+            if ($this->bufferCount > 0 && (
+                $drained
+                || $this->bufferCount >= $batchSize
+                || $this->currentTimeMs() - $lastFlush >= $flushInterval
+            )) {
                 $this->flushHttpBuffer($httpTransport);
                 $lastFlush = $this->currentTimeMs();
             }
-        });
+        }
 
         // Flush remaining on shutdown
         if ($this->bufferCount > 0) {
@@ -134,23 +162,25 @@ class AppSyncWorkerCommand extends Command
     protected function flushHttpBuffer(HttpTransport $transport): void
     {
         foreach ($this->buffer as $channel => $events) {
-            try {
-                $transport->publish($channel, $events);
-                $this->eventsPublished += count($events);
-                $this->flushCount++;
-            } catch (\Throwable $e) {
-                $this->eventsDropped += count($events);
+            foreach (array_chunk($events, self::MAX_EVENTS_PER_PUBLISH) as $batch) {
+                try {
+                    $transport->publish($channel, $batch);
+                    $this->eventsPublished += count($batch);
+                    $this->flushCount++;
+                } catch (\Throwable $e) {
+                    $this->eventsDropped += count($batch);
 
-                Log::error('AppSync worker HTTP publish failed', [
-                    'channel' => $channel,
-                    'count'   => count($events),
-                    'error'   => $e->getMessage(),
-                ]);
+                    Log::error('AppSync worker HTTP publish failed', [
+                        'channel' => $channel,
+                        'count'   => count($batch),
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
             }
         }
 
-        $this->buffer       = [];
-        $this->bufferCount  = 0;
+        $this->buffer      = [];
+        $this->bufferCount = 0;
     }
 
     // =====================================================================
@@ -161,94 +191,89 @@ class AppSyncWorkerCommand extends Command
     {
         $wsConfig      = $config['websocket'] ?? [];
         $redisConfig   = $config['redis'] ?? [];
-        $redisChannel  = $this->option('redis-channel') ?: ($redisConfig['channel'] ?? 'appsync:events');
-        $batchSize     = min((int) ($this->option('batch-size') ?: ($wsConfig['batch_size'] ?? 5)), 5);
+        $batchSize     = min((int) ($this->option('batch-size') ?: ($wsConfig['batch_size'] ?? 5)), self::MAX_EVENTS_PER_PUBLISH);
         $flushInterval = (int) ($this->option('flush-interval') ?: ($wsConfig['flush_interval'] ?? 50));
         $maxBuffer     = (int) ($this->option('max-buffer') ?: ($wsConfig['max_buffer_size'] ?? 10000));
         $statsInterval = (int) ($this->option('stats-interval') ?: ($wsConfig['stats_interval'] ?? 30));
+        $blockTimeout  = $this->blockTimeout($redisConfig);
 
         // Laravel's Redis client applies a prefix (e.g. "laravel_database_") to
-        // all commands including PUBLISH. clue/redis-react doesn't know about
-        // this prefix, so we must prepend it manually to match the channel.
-        $redisChannel = $this->getPrefixedRedisChannel($redisChannel, $redisConfig);
+        // every key, the RPUSH included. clue/redis-react doesn't know about
+        // this prefix, so we must prepend it manually to pop the same list.
+        $redisKey = $this->getPrefixedRedisKey($this->redisKey($config), $redisConfig);
 
         $this->startTime = microtime(true);
-        $this->printBanner('websocket', $redisChannel, $batchSize, $flushInterval);
+        $this->printBanner('websocket', $redisKey, $batchSize, $flushInterval);
 
         // ReactPHP loop
         $loop = \React\EventLoop\Loop::get();
 
         // Transport
-        $tokenManager = new TokenManager($config);
-        $wsTransport  = new WebSocketTransport($config, $tokenManager, $loop);
-        $wsClient     = $wsTransport->getClient();
+        $wsClient = $this->makeWebSocketClient($config, $loop);
 
         $wsClient->onReady(function () {
             $this->info('WebSocket connection ready');
         });
 
         $wsClient->onDisconnect(function () {
-            $this->warn('WebSocket disconnected — events will buffer until reconnect');
+            $this->warn('WebSocket disconnected — events stay in Redis until reconnect');
         });
 
-        // Async Redis subscriber
-        $redisUrl   = $this->buildRedisUrl($config);
-        $redisFact  = new \Clue\React\Redis\Factory($loop);
-        $subscriber = $redisFact->createLazyClient($redisUrl);
+        // Async Redis client. Lazy: it (re)connects on the next command, so a
+        // dropped connection costs one failed pop, never the worker.
+        $redis = (new \Clue\React\Redis\Factory($loop))->createLazyClient($this->buildRedisUrl($config));
 
-        $subscriber->on('error', function (\Exception $e) {
-            Log::error('AppSync worker: Redis error', ['error' => $e->getMessage()]);
-            $this->error("Redis error: {$e->getMessage()}");
-        });
+        $finished = false;
 
-        $subscriber->on('close', function () {
-            Log::error('AppSync worker: Redis connection closed');
-            $this->error('Redis connection closed');
-        });
+        $finish = function () use (&$finished, $loop, $wsClient, $redis, $batchSize) {
+            if ($finished) {
+                return;
+            }
 
-        $subscriber->subscribe($redisChannel);
+            $finished = true;
 
-        $subscriber->on('message', function (string $channel, string $payload) use ($batchSize, $maxBuffer, $wsClient) {
-            $this->eventsReceived++;
+            $this->flushAllWsChannels($batchSize, $wsClient);
+            $wsClient->disconnect();
+            $redis->close();
+            $loop->stop();
+        };
 
-            $event = json_decode($payload, true);
-
-            if (! $event || empty($event['channel'])) {
-                Log::warning('AppSync worker: invalid message', [
-                    'payload' => Str::limit($payload, 200),
-                ]);
+        $pop = function () use (&$pop, $finish, $loop, $redis, $redisKey, $blockTimeout, $maxBuffer, $batchSize, $wsClient) {
+            if ($this->stopping) {
+                $finish();
 
                 return;
             }
 
-            if ($this->bufferCount >= $maxBuffer) {
-                $this->eventsDropped++;
+            // Back-pressure: leave events in Redis while AppSync can't take them
+            if (! $wsClient->isReady() || $this->bufferCount >= $maxBuffer) {
+                $loop->addTimer(0.1, $pop);
 
-                if ($this->eventsDropped % 100 === 1) {
-                    Log::warning('AppSync worker: buffer full, dropping', [
-                        'buffer_count'  => $this->bufferCount,
-                        'total_dropped' => $this->eventsDropped,
-                    ]);
+                return;
+            }
+
+            $redis->blpop($redisKey, $blockTimeout)->then(
+                function ($item) use (&$pop, $loop, $batchSize, $wsClient) {
+                    try {
+                        if (is_array($item) && isset($item[1])) {
+                            $this->receiveWsEvent($item[1], $batchSize, $wsClient);
+                        }
+                    } catch (\Throwable $e) {
+                        Log::error('AppSync worker: failed to buffer event', ['error' => $e->getMessage()]);
+                    } finally {
+                        $loop->futureTick($pop);
+                    }
+                },
+                function (\Throwable $e) use (&$pop, $loop) {
+                    if (! $this->stopping) {
+                        Log::error('AppSync worker: Redis pop failed', ['error' => $e->getMessage()]);
+                        $this->error("Redis pop failed: {$e->getMessage()}");
+                    }
+
+                    $loop->addTimer(1.0, $pop);
                 }
-
-                return;
-            }
-
-            $appSyncChannel = '/' . ltrim($event['channel'], '/');
-
-            $eventPayload = json_encode([
-                'event'   => $event['event'] ?? '',
-                'data'    => $event['data'] ?? [],
-                'channel' => $event['channel'],
-            ]);
-
-            $this->buffer[$appSyncChannel][] = $eventPayload;
-            $this->bufferCount++;
-
-            if (count($this->buffer[$appSyncChannel]) >= $batchSize) {
-                $this->flushWsChannel($appSyncChannel, $batchSize, $wsClient);
-            }
-        });
+            );
+        };
 
         // Periodic flush
         $loop->addPeriodicTimer($flushInterval / 1000.0, function () use ($wsClient, $batchSize) {
@@ -271,15 +296,14 @@ class AppSyncWorkerCommand extends Command
             ], $wsClient->getMetrics()));
         });
 
-        // Signal handling
-        $shutdownFn = function (int $signal) use ($loop, $wsClient, $batchSize) {
+        // Signal handling: stop popping; $pop flushes and stops the loop
+        // once the pop in flight (at most block_timeout seconds) returns.
+        $shutdownFn = function (int $signal) {
             $name = $signal === SIGTERM ? 'SIGTERM' : 'SIGINT';
             $this->info("{$name} received, shutting down...");
             Log::info("AppSync worker received {$name}");
 
-            $this->flushAllWsChannels($batchSize, $wsClient);
-            $wsClient->disconnect();
-            $loop->stop();
+            $this->stopping = true;
         };
 
         if (defined('SIGTERM')) {
@@ -290,11 +314,39 @@ class AppSyncWorkerCommand extends Command
         }
 
         $wsClient->connect();
+        $loop->futureTick($pop);
         $loop->run();
 
         $this->printFinalStats($wsClient);
 
         return self::SUCCESS;
+    }
+
+    protected function makeWebSocketClient(array $config, LoopInterface $loop): AppSyncWebSocketClient
+    {
+        return (new WebSocketTransport($config, new TokenManager($config), $loop))->getClient();
+    }
+
+    protected function receiveWsEvent(string $message, int $batchSize, AppSyncWebSocketClient $wsClient): void
+    {
+        $event = $this->decodeEvent($message);
+
+        if (! $event) {
+            return;
+        }
+
+        $appSyncChannel = '/' . ltrim($event['channel'], '/');
+
+        $this->buffer[$appSyncChannel][] = json_encode([
+            'event'   => $event['event'] ?? '',
+            'data'    => $event['data'] ?? [],
+            'channel' => $event['channel'],
+        ]);
+        $this->bufferCount++;
+
+        if (count($this->buffer[$appSyncChannel]) >= $batchSize) {
+            $this->flushWsChannel($appSyncChannel, $batchSize, $wsClient);
+        }
     }
 
     protected function flushWsChannel(string $channel, int $batchSize, AppSyncWebSocketClient $wsClient): void
@@ -313,6 +365,8 @@ class AppSyncWorkerCommand extends Command
             if ($id !== null) {
                 $this->eventsPublished += count($batch);
                 $this->flushCount++;
+            } else {
+                $this->eventsDropped += count($batch);
             }
         }
     }
@@ -328,15 +382,45 @@ class AppSyncWorkerCommand extends Command
     // Shared helpers
     // =====================================================================
 
-    protected function getPrefixedRedisChannel(string $channel, array $redisConfig): string
+    protected function decodeEvent(string $message): ?array
     {
-        $connection      = $redisConfig['connection'] ?? 'default';
+        $this->eventsReceived++;
+
+        $event = json_decode($message, true);
+
+        if (! is_array($event) || empty($event['channel'])) {
+            Log::warning('AppSync worker: invalid message', [
+                'payload' => Str::limit($message, 200),
+            ]);
+
+            return null;
+        }
+
+        return $event;
+    }
+
+    protected function redisKey(array $config): string
+    {
+        return $this->option('redis-key')
+            ?: $this->option('redis-channel')
+            ?: RedisBroadcaster::queueKey($config);
+    }
+
+    protected function blockTimeout(array $redisConfig): int
+    {
+        // 0 would block forever and the worker could never stop
+        return max(1, (int) ($redisConfig['block_timeout'] ?? 1));
+    }
+
+    protected function getPrefixedRedisKey(string $key, array $redisConfig): string
+    {
+        $connection       = $redisConfig['connection'] ?? 'default';
         $connectionPrefix = config("database.redis.{$connection}.prefix");
         $globalPrefix     = config('database.redis.options.prefix', '');
 
         $prefix = $connectionPrefix ?? $globalPrefix;
 
-        return $prefix . $channel;
+        return $prefix . $key;
     }
 
     protected function buildRedisUrl(array $config): string
@@ -370,25 +454,29 @@ class AppSyncWorkerCommand extends Command
             pcntl_signal(SIGTERM, function () {
                 $this->info('SIGTERM received, shutting down...');
                 Log::info('AppSync worker received SIGTERM');
+
+                $this->stopping = true;
             });
 
             pcntl_signal(SIGINT, function () {
                 $this->info('SIGINT received, shutting down...');
                 Log::info('AppSync worker received SIGINT');
+
+                $this->stopping = true;
             });
         }
     }
 
-    protected function printBanner(string $transport, string $redisChannel, int $batchSize, int $flushInterval): void
+    protected function printBanner(string $transport, string $redisKey, int $batchSize, int $flushInterval): void
     {
         $this->info("AppSync worker starting [transport={$transport}]");
-        $this->info("  Redis channel  : {$redisChannel}");
+        $this->info("  Redis list     : {$redisKey}");
         $this->info("  Batch size     : {$batchSize}");
         $this->info("  Flush interval : {$flushInterval}ms");
 
         Log::info('AppSync worker starting', [
             'transport'      => $transport,
-            'redis_channel'  => $redisChannel,
+            'redis_key'      => $redisKey,
             'batch_size'     => $batchSize,
             'flush_interval' => $flushInterval,
         ]);

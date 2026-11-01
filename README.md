@@ -70,7 +70,9 @@ APPSYNC_RETRY_MULTIPLIER=2.0
 
 # Redis mode
 APPSYNC_REDIS_CONNECTION=default
-APPSYNC_REDIS_CHANNEL=appsync:events
+APPSYNC_REDIS_KEY=appsync:events
+APPSYNC_REDIS_MAX_LENGTH=10000
+APPSYNC_REDIS_BLOCK_TIMEOUT=1
 APPSYNC_REDIS_BATCH_SIZE=50
 APPSYNC_REDIS_FLUSH_INTERVAL=100
 
@@ -89,7 +91,7 @@ APPSYNC_WS_STATS_INTERVAL=30
 | Mode | Description | Worker required |
 | --- | --- | --- |
 | `direct` | Laravel publishes straight to AppSync using the configured transport | No |
-| `redis` | Laravel publishes to Redis, and a worker relays the events to AppSync | Yes |
+| `redis` | Laravel pushes events onto a Redis list, and a worker pops and relays them to AppSync | Yes |
 
 ### Transports
 
@@ -104,8 +106,8 @@ APPSYNC_WS_STATS_INTERVAL=30
 | --- | --- | --- |
 | `direct` | `http` | Laravel sends events directly over HTTP |
 | `direct` | `websocket` | Laravel sends events directly over WebSocket |
-| `redis` | `http` | Laravel publishes to Redis, worker flushes to AppSync over HTTP |
-| `redis` | `websocket` | Laravel publishes to Redis, worker relays over persistent WebSocket |
+| `redis` | `http` | Laravel pushes to a Redis list, worker flushes to AppSync over HTTP |
+| `redis` | `websocket` | Laravel pushes to a Redis list, worker relays over persistent WebSocket |
 
 ## Worker Usage (`redis` mode)
 
@@ -120,10 +122,25 @@ Common overrides:
 ```bash
 php artisan appsync:worker --transport=websocket
 php artisan appsync:worker --batch-size=100 --flush-interval=200
-php artisan appsync:worker --redis-channel=appsync:events --stats-interval=30
+php artisan appsync:worker --redis-key=appsync:events --stats-interval=30
 ```
 
 > **Production note**: Run the worker under **Supervisor** or **systemd** in production.
+
+### Delivery guarantees
+
+Events go onto a Redis list (`RPUSH`), and the worker pops them (`BLPOP`):
+
+- **Worker down or restarting:** events wait in the list and are delivered when it starts.
+- **Redis connection dropped:** the pop in flight fails, and the next one reconnects.
+- **AppSync unreachable:** the WebSocket worker stops popping, so events stay in Redis instead of filling memory.
+- **The list is capped** at `max_length` (oldest dropped first), so a worker that never comes back cannot fill Redis.
+- **Shutdown** (`SIGTERM` / `SIGINT`): the worker finishes the pop in flight (at most `block_timeout` seconds), flushes its buffer and exits.
+- **Delivery is at most once.** A popped event that is still in the worker's buffer when the process is force-killed, or that AppSync rejects after retries, is lost.
+
+Run **one or more** workers on the same list: each event goes to exactly one of them (with Pub/Sub before 1.2, every worker received every event). Several workers do not keep event order, so run one if order matters.
+
+Upgrading from 1.1 to 1.2: deploy the app and the worker together. See the [changelog](CHANGELOG.md).
 
 ## Usage
 
@@ -466,7 +483,9 @@ The broadcaster includes built-in protections for both direct and worker-based d
 - **Token refresh handling** for expired or invalid auth tokens
 - **Partial failure handling** so one failed channel does not stop the rest
 - **WebSocket reconnect/buffering support** for long-lived connections
-- **Worker buffer limits and stats logging** in `redis` mode
+- **Durable Redis list** in `redis` mode: events wait for the worker, capped at `max_length`
+- **Worker back-pressure**: the worker stops popping while AppSync is unreachable
+- **Self-healing Redis connection** and stats logging in the worker
 
 ## Logging
 
